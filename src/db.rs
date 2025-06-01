@@ -1,10 +1,16 @@
-use ydb::{Query, TableClient, YdbError, YdbResult, ydb_params};
+use ydb::{
+    CommandLineCredentials, Query, TableClient, YdbError, YdbOrCustomerError, YdbResult, ydb_params,
+};
+
+use ydb_grpc::generated::ydb::status_ids::StatusCode;
 
 pub async fn init_db() -> ydb::YdbResult<ydb::Client> {
-    let conn_string = std::env::var("YDB_CONNECTION_STRING")
-        .unwrap_or_else(|_| "grpc://localhost:2136?database=/local".to_string());
+    let conn_string =
+        std::env::var("YDB_CONNECTION_STRING").expect("YDB_CONNECTION_STRING must be set");
 
-    let client = ydb::ClientBuilder::new_from_connection_string(conn_string)?.client()?;
+    let client = ydb::ClientBuilder::new_from_connection_string(conn_string)?
+        .with_credentials(CommandLineCredentials::from_cmd("yc iam create-token")?)
+        .client()?;
 
     client.wait().await?;
 
@@ -27,6 +33,23 @@ pub async fn init_tables(table_client: &TableClient) -> ydb::YdbResult<()> {
         .retry_execute_scheme_query(create_url_table)
         .await?;
 
+    let create_vists = String::from(
+        "
+        CREATE TABLE visits (
+            code Utf8 NOT NULL,
+            referer String,
+            ip String,
+            timestamp Timestamp,
+
+            PRIMARY KEY(code, timestamp)
+        );
+        ",
+    );
+
+    table_client
+        .retry_execute_scheme_query(create_vists)
+        .await?;
+
     Ok(())
 }
 
@@ -40,6 +63,7 @@ pub async fn get(table_client: &TableClient, code: String) -> YdbResult<String> 
     let src: Option<String> = table_client
         .retry_transaction(|tx| async {
             let mut tx = tx;
+            print!("{}", code);
             let src: Option<String> = tx
                 .query(
                     Query::from(
@@ -68,24 +92,24 @@ pub async fn get(table_client: &TableClient, code: String) -> YdbResult<String> 
     if let Some(src) = src {
         Ok(src)
     } else {
-        Err(YdbError::Convert("".into()))
+        Err(YdbError::NoRows)
     }
 }
 
 pub async fn insert(table_client: &TableClient, src: String, code: String) -> ydb::YdbResult<()> {
-    table_client
+    let res = table_client
         .retry_transaction(|tx| async {
             let mut tx = tx;
 
             tx.query(
                 ydb::Query::from(
                     "
-                DECLARE $src as Utf8;
-                DECLARE $code as Utf8;
+                        DECLARE $src as Utf8;
+                        DECLARE $code as Utf8;
 
-                INSERT INTO urls (src, code, created_at)
-                VALUES ($src, $code, CurrentUtcTimestamp())
-            ",
+                        INSERT INTO urls (src, code, created_at)
+                        VALUES ($src, $code, CurrentUtcTimestamp())
+                    ",
                 )
                 .with_params(ydb_params!("$src"=>src.clone(), "$code" => code.clone())),
             )
@@ -94,7 +118,19 @@ pub async fn insert(table_client: &TableClient, src: String, code: String) -> yd
             tx.commit().await?;
             Ok(())
         })
-        .await?;
+        .await;
 
-    Ok(())
+    match res {
+        Ok(_) => Ok(()),
+        Err(YdbOrCustomerError::YDB(YdbError::YdbStatusError(status_err))) => {
+            if let Some(status_code) = status_err.operation_status().ok() {
+                if status_code == StatusCode::PreconditionFailed {
+                    return Ok(());
+                }
+            }
+
+            Err(YdbError::YdbStatusError(status_err))
+        }
+        Err(err) => Err(err.to_ydb_error()),
+    }
 }

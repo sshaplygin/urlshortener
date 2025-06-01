@@ -1,0 +1,4 @@
+@code = "urpjO3"
+
+GET http://localhost:8080/t/{{code}} HTTP/1.1
+

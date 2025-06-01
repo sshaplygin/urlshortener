@@ -5,9 +5,11 @@ use axum::{
     response::{IntoResponse, Json, Redirect},
     routing::{get, post},
 };
+use dotenv::dotenv;
 use hashers::fnv::fnv1a32;
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, sync::Arc};
+use std::env;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -31,6 +33,9 @@ struct ShortenResponse {
 #[derive(Deserialize)]
 struct ShortnerRequest {
     url: String,
+    utm_source: Option<String>, // от куда пришел пользователь: google, telegram, github
+    utm_campaign: Option<String>, // какие-то кампании
+    utm_content: Option<String>, // с какого конкретного места: номер поста, readme.md, linkedin/id
 }
 
 async fn shorten(
@@ -42,7 +47,12 @@ async fn shorten(
     let reply = match db::insert(&state.db, body.url, code.clone()).await {
         Ok(()) => Ok(Json(ShortenResponse {
             code: code.clone(),
-            short_url: format!("{}/{}", state.config.domain, code.clone()),
+            short_url: format!(
+                "{}://{}/{}",
+                state.config.inner().scheme,
+                state.config.inner().host,
+                code.clone()
+            ),
         })),
         Err(err) => {
             tracing::error!("shorten: get return err: {}", err);
@@ -60,7 +70,12 @@ async fn redirect(
 ) -> Result<impl IntoResponse, StatusCode> {
     let reply = match db::get(&state.db, code).await {
         Ok(src) => {
-            let localion = format!("Location: {}/{}", state.config.domain, src);
+            let localion = format!(
+                "Location: {}://{}/{}",
+                state.config.inner().scheme,
+                state.config.inner().host,
+                src,
+            );
 
             Ok(Redirect::temporary(&localion))
         }
@@ -77,6 +92,8 @@ async fn redirect(
 
 #[tokio::main]
 async fn main() {
+    dotenv().ok();
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -92,10 +109,14 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let db = match db::init_db().await {
-        Ok(db) => db,
-        Err(err) => {
+    let db = match tokio::time::timeout(Duration::from_secs(3), db::init_db()).await {
+        Ok(Ok(db)) => db,
+        Ok(Err(err)) => {
             tracing::error!("init ydb: {}", err);
+            return;
+        }
+        Err(err) => {
+            tracing::error!("connect to ydb by timeout: {}", err);
             return;
         }
     };
@@ -104,11 +125,11 @@ async fn main() {
 
     db::init_tables(&table_client).await.unwrap();
 
+    let config = config::Config::new().with_host(&env::var("HOST").expect("HOST must be set"));
+
     let state = Arc::new(AppState {
         db: table_client,
-        config: config::Config {
-            domain: String::from("http://localhost:8080"),
-        },
+        config: config,
     });
 
     let app = Router::new()
@@ -116,7 +137,11 @@ async fn main() {
         .route("/t/{code}", get(redirect))
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+    let port = env::var("PORT")
+        .expect("PORT must be set")
+        .parse::<u16>()
+        .expect("PORT must be a valid u16 number");
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::debug!("Listeging on {}", addr);
     let listner = TcpListener::bind(addr.to_string()).await.unwrap();
 
