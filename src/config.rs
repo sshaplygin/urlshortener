@@ -6,6 +6,7 @@ pub struct Config {
 }
 #[derive(Debug)]
 pub struct ConfigInner {
+    pub app_env: String,
     pub scheme: String,
     pub host: String,
 }
@@ -16,6 +17,7 @@ impl Config {
             inner: Arc::new(ConfigInner {
                 scheme: "https".to_string(),
                 host: "".to_string(),
+                app_env: "".to_string(),
             }),
         }
     }
@@ -23,6 +25,15 @@ impl Config {
     pub fn with_host(self, host: &str) -> Self {
         let mut inner = self.into_inner();
         inner.host = host.to_string();
+
+        Config {
+            inner: Arc::new(inner),
+        }
+    }
+
+    pub fn with_app_env(self, app_env: String) -> Self {
+        let mut inner = self.into_inner();
+        inner.app_env = app_env;
 
         Config {
             inner: Arc::new(inner),
@@ -38,7 +49,8 @@ impl Config {
             Ok(inner) => inner,
             Err(arc) => ConfigInner {
                 scheme: arc.scheme.clone(),
-                host: arc.scheme.clone(),
+                host: arc.host.clone(),
+                app_env: arc.app_env.clone(),
             },
         }
     }

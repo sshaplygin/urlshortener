@@ -94,22 +94,33 @@ async fn redirect(
 async fn main() {
     dotenv().ok();
 
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                // axum logs rejections from built-in extractors with the `axum::rejection`
-                // target, at `TRACE` level. `axum::rejection=trace` enables showing those events
-                format!(
-                    "{}=debug,tower_http=debug,axum::rejection=trace",
-                    env!("CARGO_CRATE_NAME")
-                )
-                .into()
-            }),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    let app_env = env::var("APP_ENV").unwrap_or_else(|_| "development".into());
 
-    let db = match tokio::time::timeout(Duration::from_secs(3), db::init_db()).await {
+    let tracing_filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            // axum logs rejections from built-in extractors with the `axum::rejection`
+            // target, at `TRACE` level. `axum::rejection=trace` enables showing those events
+            format!(
+                "{}=debug,tower_http=debug,axum::rejection=trace",
+                env!("CARGO_CRATE_NAME")
+            )
+            .into()
+        });
+
+    if app_env == "production" {
+        tracing_subscriber::registry()
+            .with(tracing_filter)
+            .with(tracing_subscriber::fmt::layer().json())
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(tracing_filter)
+            .with(tracing_subscriber::fmt::layer().with_line_number(true))
+            .init();
+    };
+
+    let db = match tokio::time::timeout(Duration::from_secs(3), db::init_db(app_env.as_str())).await
+    {
         Ok(Ok(db)) => db,
         Ok(Err(err)) => {
             tracing::error!("init ydb: {}", err);
@@ -125,7 +136,9 @@ async fn main() {
 
     db::init_tables(&table_client).await.unwrap();
 
-    let config = config::Config::new().with_host(&env::var("HOST").expect("HOST must be set"));
+    let config = config::Config::new()
+        .with_host(&env::var("HOST").expect("HOST must be set"))
+        .with_app_env(app_env);
 
     let state = Arc::new(AppState {
         db: table_client,

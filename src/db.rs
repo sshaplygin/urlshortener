@@ -1,16 +1,24 @@
 use ydb::{
-    CommandLineCredentials, Query, TableClient, YdbError, YdbOrCustomerError, YdbResult, ydb_params,
+    ClientBuilder, CommandLineCredentials, MetadataUrlCredentials, Query, TableClient, YdbError,
+    YdbOrCustomerError, YdbResult, ydb_params,
 };
 
 use ydb_grpc::generated::ydb::status_ids::StatusCode;
 
-pub async fn init_db() -> ydb::YdbResult<ydb::Client> {
+pub async fn init_db(app_env: &str) -> ydb::YdbResult<ydb::Client> {
     let conn_string =
         std::env::var("YDB_CONNECTION_STRING").expect("YDB_CONNECTION_STRING must be set");
 
-    let client = ydb::ClientBuilder::new_from_connection_string(conn_string)?
-        .with_credentials(CommandLineCredentials::from_cmd("yc iam create-token")?)
-        .client()?;
+    let mut client_builder: ClientBuilder =
+        ydb::ClientBuilder::new_from_connection_string(conn_string)?;
+
+    client_builder = if app_env == "production" {
+        client_builder.with_credentials(MetadataUrlCredentials::new())
+    } else {
+        client_builder.with_credentials(CommandLineCredentials::from_cmd("yc iam create-token")?)
+    };
+
+    let client = client_builder.client()?;
 
     client.wait().await?;
 
