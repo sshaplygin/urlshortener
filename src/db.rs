@@ -5,17 +5,19 @@ use ydb::{
 
 use ydb_grpc::generated::ydb::status_ids::StatusCode;
 
-pub async fn init_db(app_env: &str) -> ydb::YdbResult<ydb::Client> {
+use crate::config::Environment;
+
+pub async fn init_db(env: Environment) -> ydb::YdbResult<ydb::Client> {
     let conn_string =
         std::env::var("YDB_CONNECTION_STRING").expect("YDB_CONNECTION_STRING must be set");
 
     let mut client_builder: ClientBuilder =
         ydb::ClientBuilder::new_from_connection_string(conn_string)?;
 
-    client_builder = if app_env == "production" {
-        client_builder.with_credentials(MetadataUrlCredentials::new())
-    } else {
-        client_builder.with_credentials(CommandLineCredentials::from_cmd("yc iam create-token")?)
+    client_builder = match env {
+        Environment::Production => client_builder.with_credentials(MetadataUrlCredentials::new()),
+        _ => client_builder
+            .with_credentials(CommandLineCredentials::from_cmd("yc iam create-token")?),
     };
 
     let client = client_builder.client()?;
@@ -78,9 +80,9 @@ pub async fn get(table_client: &TableClient, code: String) -> YdbResult<String> 
                         "
                         DECLARE $code as Utf8;
 
-                        SELECT 
+                        SELECT
                             src
-                        FROM 
+                        FROM
                             urls
                         WHERE
                             code = $code;
@@ -131,7 +133,7 @@ pub async fn insert(table_client: &TableClient, src: String, code: String) -> yd
     match res {
         Ok(_) => Ok(()),
         Err(YdbOrCustomerError::YDB(YdbError::YdbStatusError(status_err))) => {
-            if let Some(status_code) = status_err.operation_status().ok() {
+            if let Ok(status_code) = status_err.operation_status() {
                 if status_code == StatusCode::PreconditionFailed {
                     return Ok(());
                 }

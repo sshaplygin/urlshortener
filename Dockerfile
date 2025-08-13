@@ -1,5 +1,4 @@
-# 1. Stage: Builder
-FROM rust:slim as builder
+FROM rust:latest as builder
 
 WORKDIR /usr/src/app
 
@@ -14,10 +13,6 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m appuser
-
 COPY --from=builder /usr/src/app/target/release/urlshortener /usr/local/bin/urlshortener
-
-USER appuser
 
 CMD ["urlshortener"]

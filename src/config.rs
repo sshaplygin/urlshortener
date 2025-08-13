@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -6,34 +7,52 @@ pub struct Config {
 }
 #[derive(Debug)]
 pub struct ConfigInner {
-    pub app_env: String,
+    pub env: Environment,
     pub scheme: String,
-    pub host: String,
+    pub domain: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum Environment {
+    Development,
+    Production,
+}
+
+impl FromStr for Environment {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "development" => Ok(Environment::Development),
+            "production" => Ok(Environment::Production),
+            _ => Err(()),
+        }
+    }
 }
 
 impl Config {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(ConfigInner {
-                scheme: "https".to_string(),
-                host: "".to_string(),
-                app_env: "".to_string(),
+                scheme: "http".to_string(),
+                domain: "".to_string(),
+                env: Environment::Development,
             }),
         }
     }
 
-    pub fn with_host(self, host: &str) -> Self {
+    pub fn with_domain(self, domain: &str) -> Self {
         let mut inner = self.into_inner();
-        inner.host = host.to_string();
+        inner.domain = domain.to_string();
 
         Config {
             inner: Arc::new(inner),
         }
     }
 
-    pub fn with_app_env(self, app_env: String) -> Self {
+    pub fn with_env(self, env: Environment) -> Self {
         let mut inner = self.into_inner();
-        inner.app_env = app_env;
+        inner.env = env;
 
         Config {
             inner: Arc::new(inner),
@@ -49,8 +68,8 @@ impl Config {
             Ok(inner) => inner,
             Err(arc) => ConfigInner {
                 scheme: arc.scheme.clone(),
-                host: arc.host.clone(),
-                app_env: arc.app_env.clone(),
+                domain: arc.domain.clone(),
+                env: arc.env.clone(),
             },
         }
     }
