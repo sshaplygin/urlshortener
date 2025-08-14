@@ -1,18 +1,20 @@
 use axum::{
     Router,
     extract::{Path, State},
-    http::StatusCode,
+    http::{
+        HeaderMap, StatusCode,
+        header::{HeaderValue, USER_AGENT},
+    },
     response::{IntoResponse, Json, Redirect},
     routing::{get, post},
 };
 use dotenv::dotenv;
 use hashers::fnv::fnv1a32;
 use serde::{Deserialize, Serialize};
-use std::{env, ops::Deref};
+use std::env;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tokio::signal;
-use tracing::debug;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use ydb::{TableClient, YdbError};
 
@@ -37,19 +39,17 @@ struct ShortenResponse {
 struct ShortnerRequest {
     url: String,
     utm_source: Option<String>, // от куда пришел пользователь: google, telegram, github
-    utm_campaign: Option<String>, // какие-то кампании
-    utm_content: Option<String>, // с какого конкретного места: номер поста, readme.md, linkedin/id
+    utm_campaign: Option<String>, // промо кампании
+    utm_content: Option<String>, // с какого конкретного места
 }
 
 async fn shorten(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ShortnerRequest>,
 ) -> Result<Json<ShortenResponse>, StatusCode> {
-    // Err(StatusCode::OK)
-
     let code = generate_code(&body.url, 6);
 
-    let reply = match db::insert(&state.db, body.url, code.clone()).await {
+    match db::insert(&state.db, body.url, code.clone()).await {
         Ok(()) => Ok(Json(ShortenResponse {
             code: code.clone(),
             short_url: format!(
@@ -64,37 +64,39 @@ async fn shorten(
 
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
-    };
+    }
+}
 
-    reply
+#[derive(Debug, Serialize)]
+pub struct RequestInfo {
+    user_agent: Option<String>,
+    referer: Option<String>,
 }
 
 async fn redirect(
     Path(code): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    Ok(StatusCode::OK)
+    // TODO: write message to topic for visits table?
 
-    // let reply = match db::get(&state.db, code).await {
-    //     Ok(src) => {
-    //         let localion = format!(
-    //             "Location: {}://{}/{}",
-    //             state.config.inner().scheme,
-    //             state.config.inner().domain,
-    //             src,
-    //         );
+    match db::get(&state.db, code).await {
+        Ok(src) => {
+            let localion = format!(
+                "Location: {}://{}/{}",
+                state.config.inner().scheme,
+                state.config.inner().domain,
+                src,
+            );
 
-    //         Ok(Redirect::temporary(&localion))
-    //     }
-    //     Err(YdbError::NoRows) => Err(StatusCode::NO_CONTENT),
-    //     Err(err) => {
-    //         tracing::error!("redirect: get return err: {}", err);
+            Ok(Redirect::temporary(&localion))
+        }
+        Err(YdbError::NoRows) => Err(StatusCode::NO_CONTENT),
+        Err(err) => {
+            tracing::error!("redirect: get return err: {}", err);
 
-    //         Err(StatusCode::INTERNAL_SERVER_ERROR)
-    //     }
-    // };
-
-    // reply
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }
 
 #[tokio::main]
@@ -129,7 +131,6 @@ async fn main() {
                 .init();
         }
     }
-    // let _ = call_metadata().await;
 
     let db = match tokio::time::timeout(Duration::from_secs(5), db::init_db(env.clone())).await {
         Ok(Ok(db)) => db,
@@ -203,20 +204,4 @@ fn generate_code(input: &str, length: usize) -> String {
     let hash = fnv1a32(input.as_bytes());
     let encoded = base_62::encode(&hash.to_be_bytes());
     encoded[..length.min(encoded.len())].to_string()
-}
-
-async fn call_metadata() -> Result<(), reqwest::Error> {
-    let uri: String =
-        "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token"
-            .to_string();
-    let client = reqwest::Client::new();
-    let res: reqwest::Response = client
-        .request(reqwest::Method::GET, uri)
-        .header("Metadata-Flavor", "Google")
-        .send()
-        .await?;
-
-    debug!("{:#?}", res.text().await?);
-
-    Ok(())
 }
