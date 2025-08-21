@@ -226,6 +226,7 @@ pub async fn insert(table_client: &TableClient, data: CreateData) -> ydb::YdbRes
     }
 }
 
+#[derive(Debug)]
 pub struct VisitData {
     pub code: String,
     pub url: Option<String>,
@@ -241,6 +242,7 @@ pub struct VisitData {
     pub event_timestamp: DateTime<chrono::Utc>,
 }
 
+#[derive(Debug)]
 pub struct UaInfo {
     pub user_agent: String,
     pub browser: String,
@@ -277,8 +279,8 @@ pub async fn add_visit(table_client: &TableClient, visits: Vec<VisitData>) -> yd
                 "utm_source" => visit.utm_source.clone(),
                 "utm_campaign" => visit.utm_campaign.clone(),
                 "utm_content" => visit.utm_content.clone(),
-                "event_date" => datetime_to_system_time(start_of_day_utc),
-                "event_timestamp" => datetime_to_system_time(visit.event_timestamp),
+                "event_date" => Value::Date(datetime_to_system_time(start_of_day_utc)),
+                "event_timestamp" => Value::Timestamp(datetime_to_system_time(visit.event_timestamp)),
             )
         })
         .collect();

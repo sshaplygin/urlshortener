@@ -413,13 +413,17 @@ async fn visit_collect_worker(
                                 });
                             }
 
-                            tracing::debug!("{:?}", &visits);
+                            if !visits.is_empty() {
+                                tracing::debug!("visits batch: {:?}", &visits);
 
-                            db::add_visit(tc_ref, visits).await.unwrap();
+                                db::add_visit(tc_ref, visits).await.unwrap();
+
+                                tracing::debug!("visits added successfully");
+                            }
 
                             t.commit().await?;
 
-                            tracing::debug!("transaction committed successfully");
+                            tracing::debug!("consumer batch committed successfully");
 
                             Ok(true)
                         }
