@@ -63,6 +63,15 @@ impl Config {
         &self.inner
     }
 
+    pub fn short_url(&self, code: &str) -> String {
+        format!(
+            "{}://{}/cc/{}",
+            self.inner().scheme,
+            self.inner().domain,
+            code,
+        )
+    }
+
     fn into_inner(self) -> ConfigInner {
         match Arc::try_unwrap(self.inner) {
             Ok(inner) => inner,
