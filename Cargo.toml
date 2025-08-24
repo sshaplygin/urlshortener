@@ -29,7 +29,4 @@ chrono = "0.4.41"
 ua-parser = "0.2.1"
 uaparser = "0.6.4"
 serde_yaml = "0.9.34"
-
-[patch.crates-io]
-ydb = { path = "../ydb-rs-sdk/ydb" }
-ydb-grpc = { path = "../ydb-rs-sdk/ydb-grpc" }
+url = "2.5.7"

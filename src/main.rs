@@ -23,6 +23,8 @@ use tokio::signal;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{Level, span};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use ua_parser::Extractor;
+use url::Url;
 use ydb::{
     TableClient, TopicReader, TopicWriter, TopicWriterMessageBuilder, TopicWriterOptionsBuilder,
     YdbError,
@@ -47,6 +49,7 @@ struct ShortenResponse {
 }
 
 #[derive(Deserialize)]
+// TODO: add ttl with milleconds field and expired_at timestamp with tz
 struct ShortnerRequest {
     url: String,
     utm_source: Option<String>,
@@ -55,11 +58,45 @@ struct ShortnerRequest {
     description: Option<String>,
 }
 
+impl ShortnerRequest {
+    fn build_url_with_utm(&self) -> Result<String, url::ParseError> {
+        let mut url = Url::parse(&self.url)?;
+        {
+            let mut query_pairs = url.query_pairs_mut();
+
+            if let Some(source) = &self.utm_source {
+                query_pairs.append_pair("utm_source", source);
+            }
+            if let Some(campaign) = &self.utm_campaign {
+                query_pairs.append_pair("utm_campaign", campaign);
+            }
+            if let Some(content) = &self.utm_content {
+                query_pairs.append_pair("utm_content", content);
+            }
+        }
+
+        // 4. Преобразуем обратно в строку и возвращаем.
+        Ok(url.to_string())
+    }
+}
+
 async fn shorten(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ShortnerRequest>,
 ) -> Result<Json<ShortenResponse>, StatusCode> {
-    let code = generate_code(&body.url, 6);
+    let handler_span = span!(Level::DEBUG, "shorten");
+    let _guard = handler_span.enter();
+
+    let u = match body.build_url_with_utm() {
+        Ok(u) => u,
+        Err(err) => {
+            tracing::error!("build url with utm: {}", err);
+
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    let code = generate_code(u.as_str(), 6);
 
     let data = db::CreateData {
         url: body.url.clone(),
@@ -298,11 +335,9 @@ async fn main() {
     let regexes: ua_parser::Regexes = serde_yaml::from_slice(regexes_bytes).unwrap();
     let extractor = ua_parser::Extractor::try_from(regexes).unwrap();
 
-    let ua_info = extractor.extract("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
-
-    println!("ua_info: {:?}", ua_info);
-
     tokio::spawn(visit_collect_worker(
+        env::var("VISITS_TABLE_PATH").expect("VISITS_TABLE_PATH must be set"),
+        extractor,
         urls_client.clone(),
         visits_client,
         consumer,
@@ -334,6 +369,8 @@ async fn main() {
 }
 
 async fn visit_collect_worker(
+    table_path: String,
+    ua_extractor: Extractor<'static>,
     topic_table_client: TableClient,
     table_client: TableClient,
     reader: TopicReader,
@@ -345,6 +382,8 @@ async fn visit_collect_worker(
 
     let topic_tc = &topic_table_client;
     let tc_ref = &table_client;
+    let table_path_ref = &table_path;
+    let ua_extractor_ref = &ua_extractor;
 
     loop {
         let result = topic_tc
@@ -394,7 +433,7 @@ async fn visit_collect_worker(
                                 if let Some(info) = visit_info.request_info {
                                     referer = info.referer;
                                     ip = info.ip;
-                                    ua_info = get_ua_info(info.user_agent);
+                                    ua_info = get_ua_info(ua_extractor_ref, info.user_agent);
                                 };
 
                                 visits.push(db::VisitData {
@@ -416,9 +455,14 @@ async fn visit_collect_worker(
                             if !visits.is_empty() {
                                 tracing::debug!("visits batch: {:?}", &visits);
 
-                                db::add_visit(tc_ref, visits).await.unwrap();
-
-                                tracing::debug!("visits added successfully");
+                                match db::add_visit(table_path_ref.clone(), tc_ref, visits).await {
+                                    Err(err) => {
+                                        tracing::error!("add visits: {}", err);
+                                    }
+                                    _ => {
+                                        tracing::debug!("visits added successfully");
+                                    }
+                                };
                             }
 
                             t.commit().await?;
@@ -432,7 +476,7 @@ async fn visit_collect_worker(
                             Err(ydb::YdbOrCustomerError::YDB(err))
                         }
                         Err(_timeout_err) => {
-                            tracing::info!("timeout reading batch - no more messages available");
+                            tracing::debug!("timeout reading batch - no more messages available");
                             Ok(false)
                         }
                     }
@@ -452,48 +496,57 @@ async fn visit_collect_worker(
     }
 }
 
-fn get_ua_info(user_agent: Option<String>) -> Option<db::UaInfo> {
-    // TODO: Implement actual UA parsing using the `ua-parser` crate
-    // For now, returning a dummy UaInfo with N/A values
-    let ua_string = user_agent.unwrap_or_else(|| "N/A".to_string());
+fn get_ua_info(extractor: &Extractor, user_agent: Option<String>) -> Option<db::UaInfo> {
+    let ua_str = match user_agent {
+        Some(ua_str) => ua_str,
+        _ => return None,
+    };
 
-    Some(db::UaInfo {
-        user_agent: ua_string,
-        browser: "N/A".to_string(),
-        browser_version: "N/A".to_string(),
-        os: "N/A".to_string(),
-        os_version: "N/A".to_string(),
-        device: "N/A".to_string(),
-    })
+    let ua = &ua_str.clone();
+    let ext = extractor.extract(ua);
 
-    // Example of how to use ua-parser (needs to be initialized and passed in)
+    let mut res = db::UaInfo {
+        user_agent: Some(ua_str),
+        browser: None,
+        browser_version: None,
+        os: None,
+        os_version: None,
+        device: None,
+    };
 
-    // if let Some(ua) = client.user_agent {
-    //     let family = ua.family;
-    //     let major = ua.major.unwrap_or_else(|| "N/A".to_string());
-    //     let minor = ua.minor.unwrap_or_else(|| "N/A".to_string());
-    //     let patch = ua.patch.unwrap_or_else(|| "N/A".to_string());
+    if let Some(user_agent) = ext.0 {
+        let user_agent = user_agent.into_owned();
+        res.browser = Some(user_agent.family);
+        res.browser_version = Some(format!(
+            "{}.{}.{}",
+            user_agent.major.unwrap_or("N/A".to_string()),
+            user_agent.minor.unwrap_or("N/A".to_string()),
+            user_agent.patch.unwrap_or("N/A".to_string()),
+        ));
+    }
 
-    //     println!("\n--- Browser ---");
-    //     println!("Family: {}", family);
-    //     println!("Version: {}.{}.{}", major, minor, patch);
-    // }
+    if let Some(os) = ext.1 {
+        let os = os.into_owned();
+        res.os = Some(os.os);
+        res.os_version = Some(format!(
+            "{}.{}.{}",
+            os.major.unwrap_or("N/A".to_string()),
+            os.minor.unwrap_or("N/A".to_string()),
+            os.patch.unwrap_or("N/A".to_string()),
+        ));
+    };
 
-    // if let Some(os) = client.os {
-    //     let family = os.family;
-    //     let major = os.major.unwrap_or_else(|| "N/A".to_string());
+    if let Some(device) = ext.2 {
+        let d = device.into_owned();
+        res.device = Some(format!(
+            "{} {} {}",
+            d.brand.unwrap_or("N/A".to_string()),
+            d.device,
+            d.model.unwrap_or("N/A".to_string()),
+        ));
+    };
 
-    //     println!("\n--- Operating System ---");
-    //     println!("Family: {}", family);
-    //     println!("Major Version: {}", major);
-    // }
-
-    // if let Some(device) = client.device {
-    //     let family = device.family;
-
-    //     println!("\n--- Device ---");
-    //     println!("Family: {}", family);
-    // }
+    Some(res)
 }
 
 async fn visit_writer_worker(mut receiver: mpsc::Receiver<VisitInfo>, producer: TopicWriter) {
