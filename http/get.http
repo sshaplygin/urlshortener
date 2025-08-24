@@ -1,3 +1,4 @@
+@url=http://localhost:8080
 @code = "urpjO3"
 
-GET http://localhost:8080/cc/{{code}} HTTP/1.1
+GET {{url}}/cc/{{code}} HTTP/1.1

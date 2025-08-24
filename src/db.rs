@@ -4,8 +4,8 @@ use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, UNIX_EPOCH};
 use ydb::{
-    ClientBuilder, CommandLineCredentials, MetadataUrlCredentials, Query, TableClient, Value,
-    YdbError, YdbOrCustomerError, YdbResult, ydb_params, ydb_struct,
+    BulkRows, ClientBuilder, CommandLineCredentials, MetadataUrlCredentials, Query, TableClient,
+    Value, YdbError, YdbOrCustomerError, YdbResult, ydb_params, ydb_struct,
 };
 use ydb_grpc::generated::ydb::status_ids::StatusCode;
 
@@ -26,6 +26,8 @@ pub async fn init_db(connection_key: String, env: Environment) -> ydb::YdbResult
     let client = client_builder.client()?;
 
     client.wait().await?;
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
 
     Ok(client)
 }
@@ -64,17 +66,17 @@ pub async fn init_visits_tables(table_client: &TableClient) -> ydb::YdbResult<()
             os Utf8,
             os_version Utf8,
             device Utf8,
-            referer String,
-            ip String,
+            referer Utf8,
+            ip Utf8,
             utm_source Utf8,
             utm_campaign Utf8,
             utm_content Utf8,
             event_date Date NOT NULL,
             event_timestamp Timestamp NOT NULL,
 
-            PRIMARY KEY(code, event_timestamp, event_date)
+            PRIMARY KEY(event_timestamp, code)
         )
-        PARTITION BY HASH(event_date)
+        PARTITION BY HASH(event_timestamp)
         WITH (
             STORE = COLUMN,
             AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 10
@@ -244,16 +246,20 @@ pub struct VisitData {
 
 #[derive(Debug)]
 pub struct UaInfo {
-    pub user_agent: String,
-    pub browser: String,
-    pub browser_version: String,
-    pub os: String,
-    pub os_version: String,
-    pub device: String,
+    pub user_agent: Option<String>,
+    pub browser: Option<String>,
+    pub browser_version: Option<String>,
+    pub os: Option<String>,
+    pub os_version: Option<String>,
+    pub device: Option<String>,
 }
 
-pub async fn add_visit(table_client: &TableClient, visits: Vec<VisitData>) -> ydb::YdbResult<()> {
-    let rows = visits
+pub async fn add_visit(
+    table_path: String,
+    table_client: &TableClient,
+    visits: Vec<VisitData>,
+) -> ydb::YdbResult<()> {
+    let rows: Vec<Value> = visits
         .iter()
         .map(|visit| {
             let ip_str = visit.ip.map(|ip| ip.to_string());
@@ -268,12 +274,12 @@ pub async fn add_visit(table_client: &TableClient, visits: Vec<VisitData>) -> yd
             ydb_struct!(
                 "code" => visit.code.clone(),
                 "src" => visit.url.clone(),
-                "user_agent" => visit.ua_info.as_ref().map(|ua| ua.user_agent.clone()),
-                "browser" => visit.ua_info.as_ref().map(|ua| ua.browser.clone()),
-                "browser_version" => visit.ua_info.as_ref().map(|ua| ua.browser_version.clone()),
-                "os" => visit.ua_info.as_ref().map(|ua| ua.os.clone()),
-                "os_version" => visit.ua_info.as_ref().map(|ua| ua.os_version.clone()),
-                "device" => visit.ua_info.as_ref().map(|ua| ua.device.clone()),
+                "user_agent" => visit.ua_info.as_ref().and_then(|ua| ua.user_agent.clone()),
+                "browser" => visit.ua_info.as_ref().and_then(|ua| ua.browser.clone()),
+                "browser_version" => visit.ua_info.as_ref().and_then(|ua| ua.browser_version.clone()),
+                "os" => visit.ua_info.as_ref().and_then(|ua| ua.os.clone()),
+                "os_version" => visit.ua_info.as_ref().and_then(|ua| ua.os_version.clone()),
+                "device" => visit.ua_info.as_ref().and_then(|ua| ua.device.clone()),
                 "referer" => visit.referer.clone(),
                 "ip" => ip_str,
                 "utm_source" => visit.utm_source.clone(),
@@ -288,7 +294,7 @@ pub async fn add_visit(table_client: &TableClient, visits: Vec<VisitData>) -> yd
     let my_optional_value: Option<String> = Some("hello".to_string());
     let ydb_value: Value = my_optional_value.into();
 
-    let example = Value::struct_from_fields(vec![
+    let fields = vec![
         ("code".to_string(), "test".into()),
         ("src".to_string(), ydb_value.clone()),
         ("user_agent".to_string(), ydb_value.clone()),
@@ -307,14 +313,10 @@ pub async fn add_visit(table_client: &TableClient, visits: Vec<VisitData>) -> yd
             "event_timestamp".to_string(),
             Value::Timestamp(SystemTime::now()),
         ),
-    ]);
+    ];
 
-    let rows = Value::list_from(example, rows)?;
     let res = table_client
-        .retry_execute_bulk_upsert(
-            "/ru-central1/b1gjv06vpc5tb4h6eijk/etnbjkch1br9j9e4se4n/visits".to_string(),
-            rows,
-        )
+        .retry_execute_bulk_upsert(table_path, BulkRows::new(fields, rows))
         .await;
 
     match res {

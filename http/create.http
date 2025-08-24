@@ -1,9 +1,9 @@
-POST http://localhost:8080/api/shorten HTTP/1.1
+@url=http://localhost:8080
+
+POST {{url}}/api/shorten HTTP/1.1
 content-type: application/json
 
 {
-    "url": "https://t.me/sam_shaplygin",
-    "utm_source": "github",
-    "utm_content": "profile_link",
-    "description": "Ссылка на мой персональный канал в профиле"
+    "url": "https://sshaplygin.dev/",
+    "description": "Link into my profile page"
 }
