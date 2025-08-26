@@ -2,8 +2,6 @@ FROM rust:latest as builder
 
 WORKDIR /usr/src/app
 COPY Cargo.toml Cargo.lock ./
-COPY ./ydb ./ydb
-COPY ./ydb-grpc ./ydb-grpc
 RUN \
     mkdir -v src && \
     echo "fn main() {println!(\"Building dependencies...\");}" > src/main.rs && \
