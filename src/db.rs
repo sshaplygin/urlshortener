@@ -1,11 +1,11 @@
-use std::{net::IpAddr, time::SystemTime};
+use std::net::IpAddr;
 
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, UNIX_EPOCH};
 use ydb::{
-    BulkRows, ClientBuilder, CommandLineCredentials, MetadataUrlCredentials, Query, TableClient,
-    Value, YdbError, YdbOrCustomerError, YdbResult, ydb_params, ydb_struct,
+    ClientBuilder, CommandLineCredentials, MetadataUrlCredentials, Query, TableClient, Value,
+    YdbError, YdbOrCustomerError, YdbResult, ydb_params, ydb_struct,
 };
 use ydb_grpc::generated::ydb::status_ids::StatusCode;
 
@@ -291,32 +291,8 @@ pub async fn add_visit(
         })
         .collect();
 
-    let my_optional_value: Option<String> = Some("hello".to_string());
-    let ydb_value: Value = my_optional_value.into();
-
-    let fields = vec![
-        ("code".to_string(), "test".into()),
-        ("src".to_string(), ydb_value.clone()),
-        ("user_agent".to_string(), ydb_value.clone()),
-        ("browser".to_string(), ydb_value.clone()),
-        ("browser_version".to_string(), ydb_value.clone()),
-        ("os".to_string(), ydb_value.clone()),
-        ("os_version".to_string(), ydb_value.clone()),
-        ("device".to_string(), ydb_value.clone()),
-        ("referer".to_string(), ydb_value.clone()),
-        ("ip".to_string(), ydb_value.clone()),
-        ("utm_source".to_string(), ydb_value.clone()),
-        ("utm_campaign".to_string(), ydb_value.clone()),
-        ("utm_content".to_string(), ydb_value),
-        ("event_date".to_string(), Value::Date(SystemTime::now())),
-        (
-            "event_timestamp".to_string(),
-            Value::Timestamp(SystemTime::now()),
-        ),
-    ];
-
     let res = table_client
-        .retry_execute_bulk_upsert(table_path, BulkRows::new(fields, rows))
+        .retry_execute_bulk_upsert(table_path, rows)
         .await;
 
     match res {
