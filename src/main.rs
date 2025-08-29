@@ -296,7 +296,7 @@ async fn main() {
         .unwrap();
 
     let config = config::Config::new()
-        .with_domain(&env::var("DOMAIN").expect("DOMAIN must be set"))
+        .with_origin(&env::var("ORIGIN").expect("ORIGIN must be set"))
         .with_env(env.clone());
 
     let (tx, rx) = mpsc::channel::<VisitInfo>(1024);

@@ -33,6 +33,7 @@ pub async fn init_db(connection_key: String, env: Environment) -> ydb::YdbResult
     Ok(client)
 }
 
+#[allow(dead_code)]
 pub async fn init_urls_tables(table_client: &TableClient) -> ydb::YdbResult<()> {
     let create_urls = String::from(
         "
@@ -55,6 +56,7 @@ pub async fn init_urls_tables(table_client: &TableClient) -> ydb::YdbResult<()> 
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn init_visits_tables(table_client: &TableClient) -> ydb::YdbResult<()> {
     let create_vists = String::from(
         "
