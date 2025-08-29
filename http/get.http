@@ -1,4 +1,4 @@
 @url=http://localhost:8080
-@code = "urpjO3"
+@code=0KBQS3
 
 GET {{url}}/cc/{{code}} HTTP/1.1
