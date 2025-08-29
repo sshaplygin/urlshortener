@@ -280,7 +280,8 @@ async fn main() {
 
     let urls_client = db.table_client();
 
-    db::init_urls_tables(&urls_client).await.unwrap();
+    // NOTICE: uncomment if you need run migration
+    // db::init_urls_tables(&urls_client).await.unwrap();
 
     let mut topic_client = db.topic_client();
     let producer = topic_client
@@ -329,7 +330,8 @@ async fn main() {
 
     let visits_client = db.table_client();
 
-    db::init_visits_tables(&visits_client).await.unwrap();
+    // NOTICE: uncomment if you need run migration
+    // db::init_visits_tables(&visits_client).await.unwrap();
 
     let regexes_bytes: &[u8] = include_bytes!("../regexes.yaml");
     let regexes: ua_parser::Regexes = serde_yaml::from_slice(regexes_bytes).unwrap();
