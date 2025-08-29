@@ -8,8 +8,7 @@ pub struct Config {
 #[derive(Debug)]
 pub struct ConfigInner {
     pub env: Environment,
-    pub scheme: String,
-    pub domain: String,
+    pub origin: String,
 }
 
 #[derive(Debug, Clone)]
@@ -34,16 +33,15 @@ impl Config {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(ConfigInner {
-                scheme: "http".to_string(),
-                domain: "".to_string(),
+                origin: "".to_string(),
                 env: Environment::Development,
             }),
         }
     }
 
-    pub fn with_domain(self, domain: &str) -> Self {
+    pub fn with_origin(self, origin: &str) -> Self {
         let mut inner = self.into_inner();
-        inner.domain = domain.to_string();
+        inner.origin = origin.to_string();
 
         Config {
             inner: Arc::new(inner),
@@ -64,20 +62,14 @@ impl Config {
     }
 
     pub fn short_url(&self, code: &str) -> String {
-        format!(
-            "{}://{}/cc/{}",
-            self.inner().scheme,
-            self.inner().domain,
-            code,
-        )
+        format!("{}/cc/{}", self.inner().origin, code)
     }
 
     fn into_inner(self) -> ConfigInner {
         match Arc::try_unwrap(self.inner) {
             Ok(inner) => inner,
             Err(arc) => ConfigInner {
-                scheme: arc.scheme.clone(),
-                domain: arc.domain.clone(),
+                origin: arc.origin.clone(),
                 env: arc.env.clone(),
             },
         }
