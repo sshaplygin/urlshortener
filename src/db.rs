@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, UNIX_EPOCH};
+use tracing::trace;
 use ydb::{
     ClientBuilder, CommandLineCredentials, MetadataUrlCredentials, Query, TableClient, Value,
     YdbError, YdbOrCustomerError, YdbResult, ydb_params, ydb_struct,
@@ -27,8 +28,10 @@ pub async fn init_db(connection_key: String, env: Environment) -> ydb::YdbResult
 
     client.wait().await?;
 
+    trace!("client initialized and wating");
     // https://github.com/ydb-platform/ydb-rs-sdk/issues/371
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // tokio::time::sleep(Duration::from_millis(100)).await;
+    trace!("init_db wait finished");
 
     Ok(client)
 }
@@ -218,10 +221,10 @@ pub async fn insert(table_client: &TableClient, data: CreateData) -> ydb::YdbRes
 
     match res {
         Err(YdbOrCustomerError::YDB(YdbError::YdbStatusError(status_err))) => {
-            if let Ok(status_code) = status_err.operation_status() {
-                if status_code == StatusCode::PreconditionFailed {
-                    return Ok(());
-                }
+            if let Ok(status_code) = status_err.operation_status()
+                && status_code == StatusCode::PreconditionFailed
+            {
+                return Ok(());
             }
 
             Err(YdbError::YdbStatusError(status_err))

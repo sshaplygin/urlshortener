@@ -22,6 +22,4 @@ RUN apt-get update && \
 
 COPY --from=builder /usr/src/app/target/release/urlshortener /usr/local/bin/urlshortener
 
-ENV RUST_LOG="trace"
-
 CMD ["urlshortener"]
