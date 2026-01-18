@@ -28,9 +28,6 @@ pub async fn init_db(connection_key: String, env: Environment) -> ydb::YdbResult
 
     client.wait().await?;
 
-    trace!("client initialized and wating");
-    // https://github.com/ydb-platform/ydb-rs-sdk/issues/371
-    // tokio::time::sleep(Duration::from_millis(100)).await;
     trace!("init_db wait finished");
 
     Ok(client)
