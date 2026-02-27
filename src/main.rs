@@ -14,6 +14,8 @@ use tokio::signal;
 use tokio::sync::mpsc;
 use tracing::{Level, span};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use utoipa::{OpenApi, ToSchema};
+use utoipa_swagger_ui::SwaggerUi;
 
 use url::Url;
 use ydb::{TableClient, TopicWriterOptionsBuilder, YdbError};
@@ -26,6 +28,13 @@ mod db;
 mod entity;
 mod producer;
 
+#[derive(OpenApi)]
+#[openapi(
+    paths(shorten, redirect),
+    components(schemas(ShortenResponse, ShortnerRequest))
+)]
+struct ApiDoc;
+
 #[derive(Clone)]
 struct AppState {
     urls_client: TableClient,
@@ -33,13 +42,13 @@ struct AppState {
     config: config::Config,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct ShortenResponse {
     code: String,
     short_url: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 // TODO: add ttl with milleconds field and expired_at timestamp with tz
 struct ShortnerRequest {
     url: String,
@@ -70,6 +79,15 @@ impl ShortnerRequest {
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/shorten",
+    request_body = ShortnerRequest,
+    responses(
+        (status = StatusCode::OK, description = "Short link created", body = ShortenResponse),
+        (status = StatusCode::INTERNAL_SERVER_ERROR, description = "Internal Error")
+    )
+)]
 async fn shorten(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ShortnerRequest>,
@@ -110,9 +128,27 @@ async fn shorten(
     }
 }
 
+#[derive(serde::Deserialize, utoipa::IntoParams)]
+pub struct RedirectPath {
+    pub code: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/cc/{code}",
+    params(RedirectPath),
+    responses(
+        (status = StatusCode::NO_CONTENT, description = "Not found request short code"),
+        (status = StatusCode::TEMPORARY_REDIRECT, description = "Found short code and make tmp redirect"),
+        (status = StatusCode::INTERNAL_SERVER_ERROR, description = "Internal Error")
+    ),
+    params(
+        ("code" = String, Path, description = "Unique short code", example = "TiJpa4")
+    )
+)]
 async fn redirect(
     request_info: entity::RequestInfo,
-    Path(code): Path<String>,
+    Path(params): Path<RedirectPath>,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let handler_span = span!(Level::DEBUG, "redirect_handler");
@@ -122,10 +158,10 @@ async fn redirect(
         tracing::debug!("user request info: {:?}", request_info);
     }
 
-    let link_info = match db::get(&state.urls_client, code.clone()).await {
+    let link_info = match db::get(&state.urls_client, params.code.clone()).await {
         Ok(link_info) => link_info,
         Err(YdbError::NoRows) => db::LinkInfo {
-            code,
+            code: params.code,
             url: None,
             utm_source: None,
             utm_campaign: None,
@@ -285,10 +321,13 @@ async fn main() {
         config,
     });
 
+    let swagger_ui = SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi());
+
     let app = Router::new()
         .route("/api/shorten", post(shorten))
         .route("/cc/{code}", get(redirect))
-        .with_state(state);
+        .with_state(state)
+        .merge(swagger_ui);
 
     let port = env::var("PORT")
         .expect("PORT must be set")
