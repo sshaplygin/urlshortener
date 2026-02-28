@@ -13,7 +13,8 @@ use ydb_grpc::generated::ydb::status_ids::StatusCode;
 use crate::config::Environment;
 
 pub async fn init_db(connection_key: String, env: Environment) -> ydb::YdbResult<ydb::Client> {
-    let conn_string = std::env::var(connection_key).expect("connection string must be set");
+    let conn_string = std::env::var(connection_key)
+        .map_err(|e| YdbError::Custom(format!("connection string must be set: {e}")))?;
 
     let mut client_builder: ClientBuilder =
         ydb::ClientBuilder::new_from_connection_string(conn_string)?;
@@ -270,8 +271,7 @@ pub async fn add_visit(
             let start_of_day_datetime = visit
                 .event_timestamp
                 .date_naive()
-                .and_hms_opt(0, 0, 0)
-                .unwrap();
+                .and_time(chrono::NaiveTime::MIN);
             let start_of_day_utc: DateTime<Utc> = Utc.from_utc_datetime(&start_of_day_datetime);
 
             ydb_struct!(

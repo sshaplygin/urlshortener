@@ -1,3 +1,5 @@
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used)]
 use axum::{
     Router,
     extract::{Path, State},
@@ -14,6 +16,8 @@ use tokio::signal;
 use tokio::sync::mpsc;
 use tracing::{Level, span};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use utoipa::{OpenApi, ToSchema};
+use utoipa_swagger_ui::SwaggerUi;
 
 use url::Url;
 use ydb::{TableClient, TopicWriterOptionsBuilder, YdbError};
@@ -26,6 +30,13 @@ mod db;
 mod entity;
 mod producer;
 
+#[derive(OpenApi)]
+#[openapi(
+    paths(shorten, redirect),
+    components(schemas(ShortenResponse, ShortnerRequest))
+)]
+struct ApiDoc;
+
 #[derive(Clone)]
 struct AppState {
     urls_client: TableClient,
@@ -33,13 +44,13 @@ struct AppState {
     config: config::Config,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct ShortenResponse {
     code: String,
     short_url: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 // TODO: add ttl with milleconds field and expired_at timestamp with tz
 struct ShortnerRequest {
     url: String,
@@ -70,6 +81,15 @@ impl ShortnerRequest {
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/shorten",
+    request_body = ShortnerRequest,
+    responses(
+        (status = StatusCode::OK, description = "Short link created", body = ShortenResponse),
+        (status = StatusCode::INTERNAL_SERVER_ERROR, description = "Internal Error")
+    )
+)]
 async fn shorten(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ShortnerRequest>,
@@ -110,9 +130,27 @@ async fn shorten(
     }
 }
 
+#[derive(serde::Deserialize, utoipa::IntoParams)]
+pub struct RedirectPath {
+    pub code: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/cc/{code}",
+    params(RedirectPath),
+    responses(
+        (status = StatusCode::NO_CONTENT, description = "Not found request short code"),
+        (status = StatusCode::TEMPORARY_REDIRECT, description = "Found short code and make tmp redirect"),
+        (status = StatusCode::INTERNAL_SERVER_ERROR, description = "Internal Error")
+    ),
+    params(
+        ("code" = String, Path, description = "Unique short code", example = "TiJpa4")
+    )
+)]
 async fn redirect(
     request_info: entity::RequestInfo,
-    Path(code): Path<String>,
+    Path(params): Path<RedirectPath>,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let handler_span = span!(Level::DEBUG, "redirect_handler");
@@ -122,10 +160,10 @@ async fn redirect(
         tracing::debug!("user request info: {:?}", request_info);
     }
 
-    let link_info = match db::get(&state.urls_client, code.clone()).await {
+    let link_info = match db::get(&state.urls_client, params.code.clone()).await {
         Ok(link_info) => link_info,
         Err(YdbError::NoRows) => db::LinkInfo {
-            code,
+            code: params.code,
             url: None,
             utm_source: None,
             utm_campaign: None,
@@ -202,11 +240,11 @@ async fn main() {
     {
         Ok(Ok(db)) => db,
         Ok(Err(err)) => {
-            tracing::error!("init ydb: {}", err);
+            tracing::error!("init urls ydb: {}", err);
             return;
         }
         Err(err) => {
-            tracing::error!("connect to ydb by timeout: {}", err);
+            tracing::error!("connect to ydb urls by timeout: {}", err);
             return;
         }
     };
@@ -217,32 +255,55 @@ async fn main() {
     // db::init_urls_tables(&urls_client).await.unwrap();
 
     let mut topic_client = db.topic_client();
-    let producer = topic_client
-        .create_writer_with_params(
-            TopicWriterOptionsBuilder::default()
-                .topic_path("/topics/visits".to_string())
-                .producer_id("producer".to_string())
-                .build()
-                .unwrap(),
-        )
-        .await
-        .unwrap();
 
+    let produce_params = match TopicWriterOptionsBuilder::default()
+        .topic_path("/topics/visits".to_string())
+        .producer_id("producer".to_string())
+        .build()
+    {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::error!("init produce params: {}", err);
+            return;
+        }
+    };
+
+    let producer = match topic_client.create_writer_with_params(produce_params).await {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::error!("init producer: {}", err);
+            return;
+        }
+    };
+
+    let origin = match env::var("ORIGIN") {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::error!("ORIGIN must be set: {}", err);
+            return;
+        }
+    };
     let config = config::Config::new()
-        .with_origin(&env::var("ORIGIN").expect("ORIGIN must be set"))
+        .with_origin(&origin)
         .with_env(env.clone());
 
     let (tx, rx) = mpsc::channel::<entity::VisitInfo>(1024);
 
     tokio::spawn(producer::create(rx, producer));
 
-    let consumer = topic_client
+    let consumer = match topic_client
         .create_reader(
             "urlshortener-consumer".to_string(),
             "/topics/visits".to_string(),
         )
         .await
-        .unwrap();
+    {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::error!("init consumer: {}", err);
+            return;
+        }
+    };
 
     let db = match tokio::time::timeout(
         Duration::from_secs(5),
@@ -252,11 +313,11 @@ async fn main() {
     {
         Ok(Ok(db)) => db,
         Ok(Err(err)) => {
-            tracing::error!("init ydb: {}", err);
+            tracing::error!("init vists ydb: {}", err);
             return;
         }
         Err(err) => {
-            tracing::error!("connect to ydb by timeout: {}", err);
+            tracing::error!("connect to ydb visits by timeout: {}", err);
             return;
         }
     };
@@ -267,12 +328,31 @@ async fn main() {
     // db::init_visits_tables(&visits_client).await.unwrap();
 
     let regexes_bytes: &[u8] = include_bytes!("../regexes.yaml");
-    let regexes: ua_parser::Regexes = serde_yaml::from_slice(regexes_bytes).unwrap();
-    let extractor = ua_parser::Extractor::try_from(regexes).unwrap();
+    let regexes: ua_parser::Regexes = match serde_yaml::from_slice(regexes_bytes) {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::error!("parse ua regexes: {}", err);
+            return;
+        }
+    };
+    let extractor = match ua_parser::Extractor::try_from(regexes) {
+        Ok(e) => e,
+        Err(err) => {
+            tracing::error!("create ua extractor: {}", err);
+            return;
+        }
+    };
 
     let topic_table_client = urls_client.clone();
+    let visits_table_path = match env::var("VISITS_TABLE_PATH") {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::error!("VISITS_TABLE_PATH must be set: {}", err);
+            return;
+        }
+    };
     tokio::spawn(consumer::create(
-        env::var("VISITS_TABLE_PATH").expect("VISITS_TABLE_PATH must be set"),
+        visits_table_path,
         extractor,
         topic_table_client,
         visits_client,
@@ -285,38 +365,67 @@ async fn main() {
         config,
     });
 
+    let swagger_ui = SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi());
+
+    tracing::info!("Use swagger on /swagger-ui");
+
     let app = Router::new()
         .route("/api/shorten", post(shorten))
         .route("/cc/{code}", get(redirect))
-        .with_state(state);
+        .with_state(state)
+        .merge(swagger_ui);
 
-    let port = env::var("PORT")
-        .expect("PORT must be set")
-        .parse::<u16>()
-        .expect("PORT must be a valid u16 number");
+    let port_str = match env::var("PORT") {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::error!("PORT must be set: {}", err);
+            return;
+        }
+    };
+    let port = match port_str.parse::<u16>() {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::error!("PORT must be a valid u16 number: {}", err);
+            return;
+        }
+    };
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    tracing::debug!("Listeging on {}", addr);
-    let listner = TcpListener::bind(addr.to_string()).await.unwrap();
 
-    axum::serve(listner, app)
+    tracing::info!("Listening on {}", port);
+
+    let listner = match TcpListener::bind(addr.to_string()).await {
+        Ok(l) => l,
+        Err(err) => {
+            tracing::error!("bind address {}: {}", addr, err);
+            return;
+        }
+    };
+
+    if let Err(err) = axum::serve(listner, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .unwrap();
+    {
+        tracing::error!("server error: {}", err);
+    }
 }
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        if let Err(err) = signal::ctrl_c().await {
+            tracing::error!("failed to install Ctrl+C handler: {}", err);
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(err) => {
+                tracing::error!("failed to install signal handler: {}", err);
+            }
+        }
     };
 
     #[cfg(not(unix))]
