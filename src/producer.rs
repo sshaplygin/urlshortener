@@ -20,16 +20,24 @@ pub async fn create(mut receiver: mpsc::Receiver<entity::VisitInfo>, producer: T
             }
         };
 
-        let message = TopicWriterMessageBuilder::default()
+        let message = match TopicWriterMessageBuilder::default()
             .data(payload)
             .build()
-            .unwrap();
+        {
+            Ok(msg) => msg,
+            Err(err) => {
+                tracing::error!("build message: {}", err);
+                continue;
+            }
+        };
 
         if let Err(err) = writer.write(message).await {
             tracing::error!("write message to ydb topic: {}", err);
         }
     }
-    writer.stop().await.unwrap();
+    if let Err(err) = writer.stop().await {
+        tracing::error!("stop writer: {}", err);
+    }
 
     tracing::info!("writer channel closed, shutting down worker.");
 }

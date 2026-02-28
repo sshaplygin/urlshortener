@@ -1,3 +1,5 @@
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used)]
 use axum::{
     Router,
     extract::{Path, State},
@@ -28,8 +30,6 @@ mod db;
 mod entity;
 mod producer;
 
-#[deny(clippy::unwrap_used)]
-#[deny(clippy::expect_used)]
 #[derive(OpenApi)]
 #[openapi(
     paths(shorten, redirect),
@@ -255,17 +255,20 @@ async fn main() {
     // db::init_urls_tables(&urls_client).await.unwrap();
 
     let mut topic_client = db.topic_client();
-    let producer_res = topic_client
-        .create_writer_with_params(
-            TopicWriterOptionsBuilder::default()
-                .topic_path("/topics/visits".to_string())
-                .producer_id("producer".to_string())
-                .build()
-                .unwrap(),
-        )
-        .await;
 
-    let producer = match producer_res {
+    let produce_params = match TopicWriterOptionsBuilder::default()
+        .topic_path("/topics/visits".to_string())
+        .producer_id("producer".to_string())
+        .build()
+    {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::error!("init produce params: {}", err);
+            return;
+        }
+    };
+
+    let producer = match topic_client.create_writer_with_params(produce_params).await {
         Ok(p) => p,
         Err(err) => {
             tracing::error!("init producer: {}", err);
@@ -273,22 +276,28 @@ async fn main() {
         }
     };
 
+    let origin = match env::var("ORIGIN") {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::error!("ORIGIN must be set: {}", err);
+            return;
+        }
+    };
     let config = config::Config::new()
-        .with_origin(&env::var("ORIGIN").expect("ORIGIN must be set"))
+        .with_origin(&origin)
         .with_env(env.clone());
 
     let (tx, rx) = mpsc::channel::<entity::VisitInfo>(1024);
 
     tokio::spawn(producer::create(rx, producer));
 
-    let consumer_res = topic_client
+    let consumer = match topic_client
         .create_reader(
             "urlshortener-consumer".to_string(),
             "/topics/visits".to_string(),
         )
-        .await;
-
-    let consumer = match consumer_res {
+        .await
+    {
         Ok(c) => c,
         Err(err) => {
             tracing::error!("init consumer: {}", err);
@@ -319,19 +328,36 @@ async fn main() {
     // db::init_visits_tables(&visits_client).await.unwrap();
 
     let regexes_bytes: &[u8] = include_bytes!("../regexes.yaml");
-    let regexes: ua_parser::Regexes = serde_yaml::from_slice(regexes_bytes).unwrap();
-    let extractor = ua_parser::Extractor::try_from(regexes).unwrap();
+    let regexes: ua_parser::Regexes = match serde_yaml::from_slice(regexes_bytes) {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::error!("parse ua regexes: {}", err);
+            return;
+        }
+    };
+    let extractor = match ua_parser::Extractor::try_from(regexes) {
+        Ok(e) => e,
+        Err(err) => {
+            tracing::error!("create ua extractor: {}", err);
+            return;
+        }
+    };
 
     let topic_table_client = urls_client.clone();
+    let visits_table_path = match env::var("VISITS_TABLE_PATH") {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::error!("VISITS_TABLE_PATH must be set: {}", err);
+            return;
+        }
+    };
     tokio::spawn(consumer::create(
-        env::var("VISITS_TABLE_PATH").expect("VISITS_TABLE_PATH must be set"),
+        visits_table_path,
         extractor,
         topic_table_client,
         visits_client,
         consumer,
     ));
-
-    let origin = config.inner().origin.clone();
 
     let state = Arc::new(AppState {
         urls_client,
@@ -341,42 +367,65 @@ async fn main() {
 
     let swagger_ui = SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi());
 
+    tracing::info!("Use swagger on /swagger-ui");
+
     let app = Router::new()
         .route("/api/shorten", post(shorten))
         .route("/cc/{code}", get(redirect))
         .with_state(state)
         .merge(swagger_ui);
 
-    let port = env::var("PORT")
-        .expect("PORT must be set")
-        .parse::<u16>()
-        .expect("PORT must be a valid u16 number");
+    let port_str = match env::var("PORT") {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::error!("PORT must be set: {}", err);
+            return;
+        }
+    };
+    let port = match port_str.parse::<u16>() {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::error!("PORT must be a valid u16 number: {}", err);
+            return;
+        }
+    };
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
-    tracing::info!("Listeging on {}", port);
-    tracing::info!("Use swagger on {}/swagger-ui", origin);
+    tracing::info!("Listening on {}", port);
 
-    let listner = TcpListener::bind(addr.to_string()).await.unwrap();
+    let listner = match TcpListener::bind(addr.to_string()).await {
+        Ok(l) => l,
+        Err(err) => {
+            tracing::error!("bind address {}: {}", addr, err);
+            return;
+        }
+    };
 
-    axum::serve(listner, app)
+    if let Err(err) = axum::serve(listner, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .unwrap();
+    {
+        tracing::error!("server error: {}", err);
+    }
 }
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        if let Err(err) = signal::ctrl_c().await {
+            tracing::error!("failed to install Ctrl+C handler: {}", err);
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(err) => {
+                tracing::error!("failed to install signal handler: {}", err);
+            }
+        }
     };
 
     #[cfg(not(unix))]

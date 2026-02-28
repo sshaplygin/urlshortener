@@ -48,8 +48,13 @@ pub async fn create(
                                 let raw_data: Result<Option<Vec<u8>>, YdbError> =
                                     message.read_and_take().await;
 
-                                let json_bytes =
-                                    raw_data.unwrap().ok_or("empty message data").unwrap();
+                                let json_bytes = match raw_data? {
+                                    Some(data) => data,
+                                    None => {
+                                        tracing::warn!("empty message data, skipping");
+                                        continue;
+                                    }
+                                };
                                 let visit_info: VisitInfo =
                                     match serde_json::from_slice(&json_bytes) {
                                         Ok(visit_info) => visit_info,

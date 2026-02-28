@@ -6,8 +6,8 @@ RUN \
     mkdir -v src && \
     echo "fn main() {println!(\"Building dependencies...\");}" > src/main.rs && \
     # debug build
-    cargo build && \
-    # cargo build --release && \
+    # cargo build && \
+    cargo build --release && \
     rm -Rvf src
 
 COPY src ./src
@@ -25,7 +25,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # debug build
-COPY --from=builder /usr/src/app/target/debug/urlshortener /usr/local/bin/urlshortener
-# COPY --from=builder /usr/src/app/target/release/urlshortener /usr/local/bin/urlshortener
+# COPY --from=builder /usr/src/app/target/debug/urlshortener /usr/local/bin/urlshortener
+COPY --from=builder /usr/src/app/target/release/urlshortener /usr/local/bin/urlshortener
 
 CMD ["urlshortener"]
