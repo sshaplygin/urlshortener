@@ -28,6 +28,8 @@ mod db;
 mod entity;
 mod producer;
 
+#[deny(clippy::unwrap_used)]
+#[deny(clippy::expect_used)]
 #[derive(OpenApi)]
 #[openapi(
     paths(shorten, redirect),
@@ -238,11 +240,11 @@ async fn main() {
     {
         Ok(Ok(db)) => db,
         Ok(Err(err)) => {
-            tracing::error!("init ydb: {}", err);
+            tracing::error!("init urls ydb: {}", err);
             return;
         }
         Err(err) => {
-            tracing::error!("connect to ydb by timeout: {}", err);
+            tracing::error!("connect to ydb urls by timeout: {}", err);
             return;
         }
     };
@@ -253,7 +255,7 @@ async fn main() {
     // db::init_urls_tables(&urls_client).await.unwrap();
 
     let mut topic_client = db.topic_client();
-    let producer = topic_client
+    let producer_res = topic_client
         .create_writer_with_params(
             TopicWriterOptionsBuilder::default()
                 .topic_path("/topics/visits".to_string())
@@ -261,8 +263,15 @@ async fn main() {
                 .build()
                 .unwrap(),
         )
-        .await
-        .unwrap();
+        .await;
+
+    let producer = match producer_res {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::error!("init producer: {}", err);
+            return;
+        }
+    };
 
     let config = config::Config::new()
         .with_origin(&env::var("ORIGIN").expect("ORIGIN must be set"))
@@ -272,13 +281,20 @@ async fn main() {
 
     tokio::spawn(producer::create(rx, producer));
 
-    let consumer = topic_client
+    let consumer_res = topic_client
         .create_reader(
             "urlshortener-consumer".to_string(),
             "/topics/visits".to_string(),
         )
-        .await
-        .unwrap();
+        .await;
+
+    let consumer = match consumer_res {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::error!("init consumer: {}", err);
+            return;
+        }
+    };
 
     let db = match tokio::time::timeout(
         Duration::from_secs(5),
@@ -288,11 +304,11 @@ async fn main() {
     {
         Ok(Ok(db)) => db,
         Ok(Err(err)) => {
-            tracing::error!("init ydb: {}", err);
+            tracing::error!("init vists ydb: {}", err);
             return;
         }
         Err(err) => {
-            tracing::error!("connect to ydb by timeout: {}", err);
+            tracing::error!("connect to ydb visits by timeout: {}", err);
             return;
         }
     };
@@ -315,6 +331,8 @@ async fn main() {
         consumer,
     ));
 
+    let origin = config.inner().origin.clone();
+
     let state = Arc::new(AppState {
         urls_client,
         visit_sender: tx,
@@ -334,7 +352,10 @@ async fn main() {
         .parse::<u16>()
         .expect("PORT must be a valid u16 number");
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    tracing::debug!("Listeging on {}", addr);
+
+    tracing::info!("Listeging on {}", port);
+    tracing::info!("Use swagger on {}/swagger-ui", origin);
+
     let listner = TcpListener::bind(addr.to_string()).await.unwrap();
 
     axum::serve(listner, app)
