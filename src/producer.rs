@@ -20,10 +20,7 @@ pub async fn create(mut receiver: mpsc::Receiver<entity::VisitInfo>, producer: T
             }
         };
 
-        let message = match TopicWriterMessageBuilder::default()
-            .data(payload)
-            .build()
-        {
+        let message = match TopicWriterMessageBuilder::default().data(payload).build() {
             Ok(msg) => msg,
             Err(err) => {
                 tracing::error!("build message: {}", err);
