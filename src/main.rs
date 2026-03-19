@@ -106,7 +106,14 @@ async fn shorten(
         }
     };
 
-    let code = generate_code(u.as_str(), 6);
+    let code = match generate_code(u.as_str(), 6) {
+        Ok(code) => code,
+        Err(err) => {
+            tracing::error!("build short code by {}: {}", u, err);
+
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
 
     let data = db::CreateData {
         url: body.url.clone(),
@@ -437,8 +444,10 @@ async fn shutdown_signal() {
     }
 }
 
-fn generate_code(input: &str, length: usize) -> String {
+fn generate_code(input: &str, length: usize) -> anyhow::Result<String> {
     let hash = fnv1a32(input.as_bytes());
-    let encoded = base_62::encode(&hash.to_be_bytes());
-    encoded[..length.min(encoded.len())].to_string()
+    let mut buf = vec![0u8; length];
+    let len = base62::encode_bytes(hash, &mut buf)?;
+
+    Ok(std::str::from_utf8(&buf[..len])?.to_string())
 }
