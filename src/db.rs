@@ -219,10 +219,10 @@ pub async fn insert(table_client: &TableClient, data: CreateData) -> ydb::YdbRes
 
     match res {
         Err(YdbOrCustomerError::YDB(YdbError::YdbStatusError(status_err))) => {
-            if let Ok(status_code) = status_err.operation_status() {
-                if status_code == StatusCode::PreconditionFailed {
-                    return Ok(());
-                }
+            if let Ok(status_code) = status_err.operation_status()
+                && status_code == StatusCode::PreconditionFailed
+            {
+                return Ok(());
             }
 
             Err(YdbError::YdbStatusError(status_err))

@@ -192,10 +192,10 @@ async fn redirect(
         created_at: chrono::Utc::now(),
     };
 
-    if !visit.is_empty() {
-        if let Err(err) = state.visit_sender.send(visit).await {
-            tracing::error!("send visit info: {}", err);
-        }
+    if !visit.is_empty()
+        && let Err(err) = state.visit_sender.send(visit).await
+    {
+        tracing::error!("send visit info: {}", err);
     }
 
     if let Some(url) = link_info.url {
