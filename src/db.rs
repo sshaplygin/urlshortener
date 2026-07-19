@@ -1,28 +1,31 @@
 use std::net::IpAddr;
+use std::time::SystemTime;
 
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, UNIX_EPOCH};
 use tracing::trace;
 use ydb::{
-    ClientBuilder, CommandLineCredentials, MetadataUrlCredentials, Query, TableClient, Value,
-    YdbError, YdbOrCustomerError, YdbResult, ydb_params, ydb_struct,
+    AnonymousCredentials, ClientBuilder, CommandLineCredentials, MetadataUrlCredentials, Query,
+    TableClient, Value, YdbError, YdbOrCustomerError, YdbResult, ydb_params, ydb_struct,
 };
 use ydb_grpc::generated::ydb::status_ids::StatusCode;
 
-use crate::config::Environment;
+use crate::config::YdbCredentials;
 
-pub async fn init_db(connection_key: String, env: Environment) -> ydb::YdbResult<ydb::Client> {
-    let conn_string = std::env::var(connection_key)
-        .map_err(|e| YdbError::Custom(format!("connection string must be set: {e}")))?;
-
+pub async fn init_db(
+    connection_string: &str,
+    credentials: YdbCredentials,
+) -> ydb::YdbResult<ydb::Client> {
     let mut client_builder: ClientBuilder =
-        ydb::ClientBuilder::new_from_connection_string(conn_string)?;
+        ydb::ClientBuilder::new_from_connection_string(connection_string)?;
 
-    client_builder = match env {
-        Environment::Production => client_builder.with_credentials(MetadataUrlCredentials::new()),
-        _ => client_builder
+    client_builder = match credentials {
+        YdbCredentials::Metadata => client_builder.with_credentials(MetadataUrlCredentials::new()),
+        // Shells out to the yc CLI, so this only works where that binary
+        // exists — not inside the container image.
+        YdbCredentials::CommandLine => client_builder
             .with_credentials(CommandLineCredentials::from_cmd("yc iam create-token")?),
+        YdbCredentials::Anonymous => client_builder.with_credentials(AnonymousCredentials::new()),
     };
 
     let client = client_builder.client()?;
@@ -34,7 +37,6 @@ pub async fn init_db(connection_key: String, env: Environment) -> ydb::YdbResult
     Ok(client)
 }
 
-#[allow(dead_code)]
 pub async fn init_urls_tables(table_client: &TableClient) -> ydb::YdbResult<()> {
     let create_urls = String::from(
         "
@@ -57,9 +59,96 @@ pub async fn init_urls_tables(table_client: &TableClient) -> ydb::YdbResult<()> 
     Ok(())
 }
 
-#[allow(dead_code)]
+/// Backing store for the short-code counter. A single row, updated in a
+/// serializable transaction, is what makes generated codes collision-free.
+pub async fn init_code_counter_table(table_client: &TableClient) -> ydb::YdbResult<()> {
+    let create_counter = String::from(
+        "
+        CREATE TABLE code_counter (
+            name Utf8 NOT NULL,
+            next_id Uint64 NOT NULL,
+
+            PRIMARY KEY(name)
+        );
+    ",
+    );
+
+    table_client
+        .retry_execute_scheme_query(create_counter)
+        .await?;
+
+    Ok(())
+}
+
+/// Name of the counter row. A single row is enough: callers claim ids in
+/// blocks, so this is touched once per `block_size` links rather than per link.
+const CODE_COUNTER_NAME: &str = "short_code";
+
+/// Claims `block_size` consecutive counter values and returns the first.
+///
+/// Runs in a serializable transaction, so two instances racing here conflict
+/// and one retries — neither can be handed a range the other already owns.
+/// Values left unused when a process exits are simply skipped; codes have no
+/// reason to be contiguous.
+pub async fn reserve_code_block(
+    table_client: &TableClient,
+    block_size: u64,
+) -> ydb::YdbResult<u64> {
+    let start = table_client
+        .retry_transaction(|tx| async move {
+            let mut tx = tx;
+
+            let read = Query::from(
+                "
+                    DECLARE $name as Utf8;
+
+                    SELECT
+                        next_id
+                    FROM
+                        code_counter
+                    WHERE
+                        name = $name;
+                ",
+            )
+            .with_params(ydb_params!("$name" => CODE_COUNTER_NAME.to_string()));
+
+            // A missing row means the counter has never been used. Starting at
+            // zero is safe only because this runs inside the same serializable
+            // transaction as the write below.
+            let current: u64 = match tx.query(read).await?.into_only_row() {
+                Ok(mut row) => row.remove_field_by_name("next_id")?.try_into()?,
+                Err(YdbError::NoRows) => 0,
+                Err(err) => return Err(err.into()),
+            };
+
+            let write = Query::from(
+                "
+                    DECLARE $name as Utf8;
+                    DECLARE $next_id as Uint64;
+
+                    UPSERT INTO code_counter (name, next_id) VALUES ($name, $next_id);
+                ",
+            )
+            .with_params(ydb_params!(
+                "$name" => CODE_COUNTER_NAME.to_string(),
+                "$next_id" => current.saturating_add(block_size),
+            ));
+
+            tx.query(write).await?;
+            tx.commit().await?;
+
+            Ok(current)
+        })
+        .await
+        .map_err(|err| err.to_ydb_error())?;
+
+    trace!("reserved code block starting at {}", start);
+
+    Ok(start)
+}
+
 pub async fn init_visits_tables(table_client: &TableClient) -> ydb::YdbResult<()> {
-    let create_vists = String::from(
+    let create_visits = String::from(
         "
         CREATE TABLE visits (
             code Utf8 NOT NULL,
@@ -89,7 +178,7 @@ pub async fn init_visits_tables(table_client: &TableClient) -> ydb::YdbResult<()
     );
 
     table_client
-        .retry_execute_scheme_query(create_vists)
+        .retry_execute_scheme_query(create_visits)
         .await?;
 
     Ok(())
@@ -108,14 +197,15 @@ pub struct LinkInfo {
     pub utm_content: Option<String>,
 }
 
-pub async fn get(table_client: &TableClient, code: String) -> YdbResult<LinkInfo> {
+/// Looks up a short code. Returns `Ok(None)` when the code is unknown.
+pub async fn get(table_client: &TableClient, code: String) -> YdbResult<Option<LinkInfo>> {
     let table_client = table_client.clone_with_transaction_options(
         ydb::TransactionOptions::new()
             .with_autocommit(true)
             .with_mode(ydb::Mode::OnlineReadonly),
     );
 
-    let res: LinkInfo = table_client
+    let res: Option<LinkInfo> = table_client
         .retry_transaction(|tx| async {
             let mut tx = tx;
 
@@ -136,7 +226,11 @@ pub async fn get(table_client: &TableClient, code: String) -> YdbResult<LinkInfo
             )
             .with_params(ydb_params!("$code"=>code.clone()));
 
-            let mut row = tx.query(query).await?.into_only_row()?;
+            let mut row = match tx.query(query).await?.into_only_row() {
+                Ok(row) => row,
+                Err(YdbError::NoRows) => return Ok(None),
+                Err(err) => return Err(err.into()),
+            };
 
             let url: String = row.remove_field_by_name("src")?.try_into()?;
             let utm_source: Option<String> = row.remove_field_by_name("utm_source")?.try_into()?;
@@ -145,13 +239,13 @@ pub async fn get(table_client: &TableClient, code: String) -> YdbResult<LinkInfo
             let utm_content: Option<String> =
                 row.remove_field_by_name("utm_content")?.try_into()?;
 
-            Ok(LinkInfo {
+            Ok(Some(LinkInfo {
                 url: Some(url),
                 code: code.clone(),
                 utm_source,
                 utm_campaign,
                 utm_content,
-            })
+            }))
         })
         .await?;
 
@@ -160,14 +254,31 @@ pub async fn get(table_client: &TableClient, code: String) -> YdbResult<LinkInfo
 
 pub struct CreateData {
     pub code: String,
+    /// Final redirect target, including any UTM parameters.
     pub url: String,
-    pub utm_source: Option<String>, // от куда пришел пользователь: google, telegram, github
-    pub utm_campaign: Option<String>, // промо кампании
-    pub utm_content: Option<String>, // с какого конкретного места
-    pub description: Option<String>, // дополнительная информация
+    /// Traffic origin: google, telegram, github.
+    pub utm_source: Option<String>,
+    /// Promotional campaign name.
+    pub utm_campaign: Option<String>,
+    /// Specific placement the traffic came from.
+    pub utm_content: Option<String>,
+    /// Free-form note about the link.
+    pub description: Option<String>,
 }
 
-pub async fn insert(table_client: &TableClient, data: CreateData) -> ydb::YdbResult<()> {
+/// Result of attempting to claim a short code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertOutcome {
+    Inserted,
+    /// The code is already taken. Codes come from a counter run through a
+    /// bijection, so this cannot happen in normal operation — it means the
+    /// counter row was reset or `CODE_SECRET` was rotated. Kept as a hard
+    /// backstop: silently reusing the row would hand the caller a link
+    /// pointing at somebody else's URL.
+    Conflict,
+}
+
+pub async fn insert(table_client: &TableClient, data: CreateData) -> ydb::YdbResult<InsertOutcome> {
     let res = table_client
         .retry_transaction(|tx| async {
             let mut tx = tx;
@@ -218,17 +329,19 @@ pub async fn insert(table_client: &TableClient, data: CreateData) -> ydb::YdbRes
         .await;
 
     match res {
+        Ok(()) => Ok(InsertOutcome::Inserted),
         Err(YdbOrCustomerError::YDB(YdbError::YdbStatusError(status_err))) => {
+            // YDB reports a primary-key clash on INSERT as PRECONDITION_FAILED.
+            // Surface it as a conflict so the caller can pick another code.
             if let Ok(status_code) = status_err.operation_status()
                 && status_code == StatusCode::PreconditionFailed
             {
-                return Ok(());
+                return Ok(InsertOutcome::Conflict);
             }
 
             Err(YdbError::YdbStatusError(status_err))
         }
         Err(err) => Err(err.to_ydb_error()),
-        _ => Ok(()),
     }
 }
 
@@ -245,7 +358,7 @@ pub struct VisitData {
     pub utm_campaign: Option<String>,
     pub utm_content: Option<String>,
 
-    pub event_timestamp: DateTime<chrono::Utc>,
+    pub event_timestamp: DateTime<Utc>,
 }
 
 #[derive(Debug)]
@@ -288,23 +401,15 @@ pub async fn add_visit(
                 "utm_source" => visit.utm_source.clone(),
                 "utm_campaign" => visit.utm_campaign.clone(),
                 "utm_content" => visit.utm_content.clone(),
-                "event_date" => Value::Date(datetime_to_system_time(start_of_day_utc)),
-                "event_timestamp" => Value::Timestamp(datetime_to_system_time(visit.event_timestamp)),
+                // chrono's SystemTime conversion keeps sub-second precision and
+                // handles pre-epoch instants without wrapping.
+                "event_date" => Value::Date(SystemTime::from(start_of_day_utc)),
+                "event_timestamp" => Value::Timestamp(SystemTime::from(visit.event_timestamp)),
             )
         })
         .collect();
 
-    let res = table_client
+    table_client
         .retry_execute_bulk_upsert(table_path, rows)
-        .await;
-
-    match res {
-        Err(err) => Err(err),
-        _ => Ok(()),
-    }
-}
-
-fn datetime_to_system_time(datetime: DateTime<chrono::Utc>) -> std::time::SystemTime {
-    let secs_since_epoch = datetime.timestamp();
-    UNIX_EPOCH + Duration::from_secs(secs_since_epoch as u64)
+        .await
 }

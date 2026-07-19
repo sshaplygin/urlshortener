@@ -1,11 +1,64 @@
-version: "3.0"
+# Local development stack: YDB plus both application roles.
+#
+# This mirrors the production split (serverless container for the API, an
+# always-on worker for the topic drain) without needing two deployments. On an
+# always-on host such as this one, running both is safe — the freeze-between-
+# requests behaviour that forces the split only applies to serverless.
+#
+# Deliberately does NOT use `env_file: .env`: that file points at the real
+# Yandex Cloud database, and picking it up here would aim local containers at
+# production. Every value below is local-only.
+
+x-app: &app
+  build: .
+  # Anonymous credentials: the container image has no `yc` CLI, so the default
+  # CommandLine credential source cannot work here.
+  environment: &app-env
+    APP_ENV: development
+    YDB_CREDENTIALS: anonymous
+    YDB_URLS_CONNECTION_STRING: grpc://ydb:2136?database=/local
+    YDB_VISITS_CONNECTION_STRING: grpc://ydb:2136?database=/local
+    VISITS_TABLE_PATH: /local/visits
+    ORIGIN: http://localhost:8080
+    CODE_SECRET: local-development-secret-not-for-production
+    RUST_LOG: urlshortener=debug
+  depends_on:
+    ydb:
+      condition: service_started
+  restart: unless-stopped
+
 services:
   ydb:
     image: ydbplatform/local-ydb:latest
-    hostname: localhost # for good discovery
+    hostname: ydb
     platform: linux/amd64
     environment:
       YDB_ANONYMOUS_CREDENTIALS: 1
+      YDB_USE_IN_MEMORY_PDISKS: 1
     ports:
       - "2135:2135" # port with tls
       - "2136:2136" # port without tls
+
+  # The HTTP API. Mirrors the serverless container in production.
+  server:
+    <<: *app
+    environment:
+      <<: *app-env
+      APP_ROLE: server
+      # One-shot schema creation; harmless to leave on for a local stack that
+      # is torn down regularly, since the tables are recreated each time.
+      RUN_MIGRATIONS: "true"
+    ports:
+      - "8080:8080"
+
+  # The topic drain. Mirrors the always-on worker in production.
+  consumer:
+    <<: *app
+    environment:
+      <<: *app-env
+      APP_ROLE: consumer
+    depends_on:
+      ydb:
+        condition: service_started
+      server:
+        condition: service_started

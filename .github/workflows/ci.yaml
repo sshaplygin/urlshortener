@@ -8,6 +8,10 @@ on:
   pull_request:
     branches:
       - main
+  # Advisories land independently of code changes, so re-run on a schedule to
+  # catch new CVEs in dependencies that are already merged.
+  schedule:
+    - cron: "0 6 * * 1"
 
 jobs:
   fmt:
@@ -41,7 +45,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
   test:
     name: Tests
@@ -57,4 +61,25 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run tests
-        run: cargo test --all-features
+        run: cargo test --all-features --locked
+
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      # Fails on any vulnerability except those documented in .cargo/audit.toml.
+      # Unmaintained-crate warnings are reported but do not gate merges, since
+      # every current one is transitive through ydb.
+      - name: Audit dependencies for known vulnerabilities
+        run: cargo audit

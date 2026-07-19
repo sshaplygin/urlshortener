@@ -1,2 +1,10 @@
 .env
 .HELP.md
+target
+.git
+.github
+.vscode
+.claude
+http
+README.md
+docker-compose.yaml
