@@ -3487,9 +3487,9 @@ dependencies = [
 
 [[package]]
 name = "ydb-grpc"
-version = "0.2.2"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d80fac8d16a3821d5648822f02a0749b777667abc25a19752f4dc991884846a8"
+checksum = "59e9102bced1098de7735d02dab52cba021f9cd9ee95e34d7fa2468f1baa0226"
 dependencies = [
  "pbjson",
  "pbjson-build",
