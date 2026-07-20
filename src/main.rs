@@ -1,5 +1,8 @@
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
+// The consumer's `retry_tx` callback is a large async closure whose nested
+// future layout exceeds the default limit when the compiler computes it.
+#![recursion_limit = "256"]
 
 mod code;
 mod config;
@@ -36,7 +39,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use url::Url;
 use utoipa::{OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
-use ydb::{TableClient, TopicWriterOptionsBuilder};
+use ydb::{QueryClient, TopicWriterOptions};
 
 use crate::code::CodeAllocator;
 use crate::config::{AppRole, Config, Environment};
@@ -75,7 +78,7 @@ const ALLOWED_SCHEMES: [&str; 2] = ["http", "https"];
 struct ApiDoc;
 
 struct AppState {
-    urls_client: TableClient,
+    urls_client: QueryClient,
     code_allocator: CodeAllocator,
     visit_writer: producer::VisitWriter,
     config: Config,
@@ -240,7 +243,10 @@ async fn shorten(
         description: body.description.clone(),
     };
 
-    match db::insert(&state.urls_client, data).await {
+    // Cloned per request: the query builders need `&mut`, and the state behind
+    // the `Arc` is shared. A clone is a handle onto the same pool, not a new
+    // connection.
+    match db::insert(&mut state.urls_client.clone(), data).await {
         Ok(InsertOutcome::Inserted) => Ok(Json(ShortenResponse {
             short_url: state.config.short_url(&code),
             code,
@@ -290,7 +296,7 @@ async fn redirect(
         tracing::debug!("user request info: {:?}", request_info);
     }
 
-    let link_info = match db::get(&state.urls_client, params.code.clone()).await {
+    let link_info = match db::get(&mut state.urls_client.clone(), params.code.clone()).await {
         Ok(Some(link_info)) => link_info,
         Ok(None) => db::LinkInfo {
             code: params.code.clone(),
@@ -428,7 +434,7 @@ async fn run_server(config: Config) -> Result<()> {
     )
     .await?;
 
-    let urls_client = urls_db.table_client();
+    let urls_client = urls_db.query_client();
 
     if config.run_migrations {
         let visits_db = connect_db(
@@ -437,7 +443,7 @@ async fn run_server(config: Config) -> Result<()> {
             "visits",
         )
         .await?;
-        run_migrations(&urls_client, &visits_db.table_client()).await?;
+        run_migrations(&mut urls_client.clone(), &mut visits_db.query_client()).await?;
     }
 
     let app = build_server(&config, &urls_db, urls_client).await?;
@@ -472,11 +478,13 @@ async fn run_all(config: Config) -> Result<()> {
     )
     .await?;
 
-    let urls_client = urls_db.table_client();
+    let urls_client = urls_db.query_client();
+    // The visits table is written with a bulk upsert, which is a table-service
+    // RPC rather than YQL, so this role needs both client types.
     let visits_client = visits_db.table_client();
 
     if config.run_migrations {
-        run_migrations(&urls_client, &visits_client).await?;
+        run_migrations(&mut urls_client.clone(), &mut visits_db.query_client()).await?;
     }
 
     let app = build_server(&config, &urls_db, urls_client.clone()).await?;
@@ -506,7 +514,7 @@ async fn run_all(config: Config) -> Result<()> {
 async fn build_server(
     config: &Config,
     urls_db: &ydb::Client,
-    urls_client: TableClient,
+    urls_client: QueryClient,
 ) -> Result<Router> {
     let visit_writer = build_visit_writer(urls_db).await?;
 
@@ -546,11 +554,11 @@ async fn run_consumer(config: Config) -> Result<()> {
     )
     .await?;
 
-    let urls_client = urls_db.table_client();
+    let urls_client = urls_db.query_client();
     let visits_client = visits_db.table_client();
 
     if config.run_migrations {
-        run_migrations(&urls_client, &visits_client).await?;
+        run_migrations(&mut urls_client.clone(), &mut visits_db.query_client()).await?;
     }
 
     let extractor = load_ua_extractor()?;
@@ -584,11 +592,10 @@ async fn run_consumer(config: Config) -> Result<()> {
 }
 
 async fn build_visit_writer(urls_db: &ydb::Client) -> Result<producer::VisitWriter> {
-    let produce_params = TopicWriterOptionsBuilder::default()
+    let produce_params = TopicWriterOptions::builder()
         .topic_path(VISITS_TOPIC_PATH.to_string())
         .producer_id(instance_producer_id())
-        .build()
-        .map_err(|err| anyhow!("init produce params: {err}"))?;
+        .build();
 
     let writer = urls_db
         .topic_client()
@@ -638,7 +645,10 @@ async fn connect_db(
     .map_err(|err| anyhow!("init {label} ydb: {err}"))
 }
 
-async fn run_migrations(urls_client: &TableClient, visits_client: &TableClient) -> Result<()> {
+async fn run_migrations(
+    urls_client: &mut QueryClient,
+    visits_client: &mut QueryClient,
+) -> Result<()> {
     tracing::info!("RUN_MIGRATIONS is set, applying schema");
 
     db::init_urls_tables(urls_client)

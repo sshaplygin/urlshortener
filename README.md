@@ -174,3 +174,25 @@ cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --all-features --locked
 cargo audit
 ```
+
+### Integration tests
+
+Every query in `db.rs` is only ever validated by the server, so the database
+layer has tests that run against a real YDB. They are `#[ignore]`d to keep
+`cargo test` hermetic:
+
+```bash
+docker compose up -d ydb
+cargo test --all-features --locked -- --ignored --test-threads=1
+```
+
+Single-threaded because the tests share one schema and the short-code counter
+is a single row, so parallel runs contend on it. CI runs them in a separate job
+against a YDB service container.
+
+Two caveats when running locally. The tests pin the endpoint with
+`StaticDiscovery`, because the container advertises its own hostname through
+discovery and the host cannot resolve it. And `ydbplatform/local-ydb` has no
+column-store support, so `visits` is created as a row-store table with
+identical columns — the bulk upsert is covered, the `STORE = COLUMN` clause in
+`init_visits_tables` is not.
