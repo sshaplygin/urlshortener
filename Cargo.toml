@@ -36,10 +36,5 @@ ua-parser = "0.2.1"
 url = "2.5.7"
 utoipa = "5.4.0"
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
-ydb = "0.10.1"
-# Pinned exactly: ydb 0.10.x does not compile against ydb-grpc 0.2.1+, which
-# added proto fields (topic metrics_level, InitRequest partition_max_in_flight_bytes,
-# scheme entry ResourcePool/Transfer/SysView) that ydb never initializes or matches.
-# Cargo unifies this with ydb's own ydb-grpc, so a caret range breaks the build.
-# Unpin only when upgrading ydb (0.17.0 is current).
-ydb-grpc = "=0.2.0"
+ydb = "0.17.0"
+ydb-grpc = "0.2.2"

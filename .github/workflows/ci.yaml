@@ -63,6 +63,41 @@ jobs:
       - name: Run tests
         run: cargo test --all-features --locked
 
+  # The database layer is only checked by the server: a rejected YQL statement
+  # or a changed error code compiles cleanly and fails at runtime. These tests
+  # are `#[ignore]`d so the job above stays hermetic, and run here against a
+  # real YDB.
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    services:
+      ydb:
+        image: ydbplatform/local-ydb:latest
+        env:
+          YDB_ANONYMOUS_CREDENTIALS: 1
+          YDB_USE_IN_MEMORY_PDISKS: 1
+        ports:
+          - 2136:2136
+        options: >-
+          --health-cmd "/health_check"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      # Single-threaded: the tests share one schema and the counter is a single
+      # row, so parallel runs would contend on it.
+      - name: Run integration tests
+        run: cargo test --all-features --locked -- --ignored --test-threads=1
+
   audit:
     name: Security audit
     runs-on: ubuntu-latest

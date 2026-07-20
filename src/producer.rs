@@ -10,14 +10,13 @@
 //! happen has to happen while the request is still open.
 
 use tokio::sync::Mutex;
-use ydb::{TopicWriter, TopicWriterMessageBuilder};
+use ydb::{TopicWriter, TopicWriterMessage};
 
 use crate::entity;
 
 #[derive(Debug)]
 pub enum VisitWriteError {
     Serialize(serde_json::Error),
-    BuildMessage(String),
     Write(ydb::YdbError),
 }
 
@@ -25,7 +24,6 @@ impl std::fmt::Display for VisitWriteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             VisitWriteError::Serialize(err) => write!(f, "serialize visit info: {err}"),
-            VisitWriteError::BuildMessage(err) => write!(f, "build message: {err}"),
             VisitWriteError::Write(err) => write!(f, "write message to ydb topic: {err}"),
         }
     }
@@ -57,16 +55,13 @@ impl VisitWriter {
     pub async fn write(&self, visit: &entity::VisitInfo) -> Result<(), VisitWriteError> {
         let payload = serde_json::to_vec(visit).map_err(VisitWriteError::Serialize)?;
 
-        let message = TopicWriterMessageBuilder::default()
-            .data(payload)
-            .build()
-            .map_err(|err| VisitWriteError::BuildMessage(err.to_string()))?;
+        let message = TopicWriterMessage::builder().data(payload).build();
 
         // The lock is held only long enough to hand the message to the writer's
         // internal queue; the acknowledgement is awaited after releasing it, so
         // concurrent requests pipeline instead of queueing behind one round-trip.
         let ack = {
-            let mut writer = self.writer.lock().await;
+            let writer = self.writer.lock().await;
             writer
                 .write_with_ack_future(message)
                 .await

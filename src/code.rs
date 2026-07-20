@@ -18,7 +18,7 @@ use std::fmt;
 
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
-use ydb::TableClient;
+use ydb::QueryClient;
 
 use crate::db;
 
@@ -54,7 +54,7 @@ impl std::error::Error for CodeError {}
 
 /// Hands out short codes that can never collide.
 pub struct CodeAllocator {
-    table_client: TableClient,
+    query_client: QueryClient,
     /// How many counter values to claim per database round-trip.
     block_size: u64,
     /// Size of the code space, `62^length`.
@@ -76,7 +76,7 @@ impl CodeAllocator {
     /// the deployment: a different key is a different permutation, so codes
     /// minted after a rotation can collide with codes minted before it.
     pub fn new(
-        table_client: TableClient,
+        query_client: QueryClient,
         secret: &str,
         length: usize,
         block_size: u64,
@@ -84,7 +84,7 @@ impl CodeAllocator {
         let space = code_space(length).ok_or(CodeError::SpaceExhausted)?;
 
         Ok(CodeAllocator {
-            table_client,
+            query_client,
             block_size: block_size.max(1),
             space,
             length,
@@ -111,7 +111,7 @@ impl CodeAllocator {
         let mut reserved = self.reserved.lock().await;
 
         if reserved.next >= reserved.end {
-            let start = db::reserve_code_block(&self.table_client, self.block_size)
+            let start = db::reserve_code_block(&mut self.query_client.clone(), self.block_size)
                 .await
                 .map_err(CodeError::Db)?;
 
